@@ -1,11 +1,9 @@
 ---
-title: "Key - Port 21337"
-date: 2026-01-12 00:24:32 +0000
-categories: ['CTF']
-tags: []
----
-
-#insane #aoc25 
+title: "Advent of Cyber 2025 - Side Quest 2: Scheme Catcher"
+date: 2026-01-01 00:00:00 +0530
+categories: [CTF, TryHackMe]
+tags: [advent-of-cyber-2025, rev, pwn]
+--- 
 
 ---
 # Key - Port 21337
@@ -479,7 +477,7 @@ and then finally if exited normally prints the status code
 
 and finally the
 
-```C
+```c
 unsigned __int64 payload_load()
 {
   size_t v0; // rax
