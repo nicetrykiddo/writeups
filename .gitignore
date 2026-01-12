@@ -26,5 +26,4 @@ package-lock.json
 converted/
 .DS_Store
 Thumbs.db
-_sass/vendors
 assets/js/dist
