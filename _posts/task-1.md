@@ -1,14 +1,10 @@
 ---
-title: "Advent of Cyber 2025 - Side Quest 1: The Great Disappearing Act"
-date: 2026-01-01 00:00:00 +0530
-categories:
-  - CTF
-  - TryHackMe
-  - Advent of Cyber 2025
-tags:
-  - advent-of-cyber-2025
-  - web
+title: "Task 1"
+date: 2026-02-26 20:44:07 +0000
+categories: ["CTF"]
+tags: []
 ---
+
 ---
 # Task 1
 
