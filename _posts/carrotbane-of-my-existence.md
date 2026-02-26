@@ -1,10 +1,15 @@
 ---
-title: "Carrotbane Of My Existence"
-date: 2026-02-26 20:48:43 +0000
-categories: ["CTF"]
-tags: []
+title: "Advent of Cyber 2025 - Side Quest 3: Carrotbane of My Existence"
+date: 2026-01-01 00:00:00 +0530
+categories:
+  - CTF
+  - TryHackMe
+  - Advent of Cyber 2025
+tags:
+  - advent-of-cyber-2025
+  - web
+  - ai
 ---
-
 ---
 ## Task 0 Find the key!
 
