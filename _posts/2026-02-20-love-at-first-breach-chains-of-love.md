@@ -26,6 +26,7 @@ tags:
 5. [JWT Forgery → Admin Access](#5-jwt-forgery--admin-access)
 6. [SSRF & Internal Service Discovery](#6-ssrf--internal-service-discovery)
 7. [Python Sandbox Escape → RCE](#7-python-sandbox-escape--rce)
+
 ---
 
 ## 1. Reconnaissance
