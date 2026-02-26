@@ -3,6 +3,7 @@
 # Run jekyll serve and then launch the site
 
 prod=false
+incremental=true
 command="bundle exec jekyll s -l"
 host="127.0.0.1"
 
@@ -14,6 +15,7 @@ help() {
   echo "Options:"
   echo "     -H, --host [HOST]    Host to bind to."
   echo "     -p, --production     Run Jekyll in 'production' mode."
+  echo "     -f, --full           Disable incremental rebuilds."
   echo "     -h, --help           Print this help information."
 }
 
@@ -26,6 +28,10 @@ while (($#)); do
     ;;
   -p | --production)
     prod=true
+    shift
+    ;;
+  -f | --full)
+    incremental=false
     shift
     ;;
   -h | --help)
@@ -41,6 +47,10 @@ while (($#)); do
 done
 
 command="$command -H $host"
+
+if $incremental; then
+  command="$command --incremental"
+fi
 
 if $prod; then
   command="JEKYLL_ENV=production $command"
