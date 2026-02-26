@@ -347,7 +347,7 @@ cat flag.txt → THM{s4ndb0x_3sc4p3d_w1th_RCE_l1k3_4_pr0}
 The full exploit chain is a classic web CTF progression: information disclosure → injection → privilege escalation → SSRF to internal services → sandbox escape. The key insight at each stage was:
 
 1. **Git disclosure** — Always check for `.git/` on web servers.
-2. **SSTI** — The debug backdoor required the *exact* string `{% raw %}{{ config }}{% endraw %}`, not a generic SSTI payload like `{% raw %}{{7*7}}{% endraw %}`.
+2. **SSTI** — The debug backdoor required the *exact* string `{{ config }}`, not a generic SSTI payload like `{{7*7}}`.
 3. **JWT** — Once you have the signing secret, you own the auth.
 4. **SSRF** — The digit filter was bypassed simply by using DNS hostnames.
 5. **Sandbox escape** — The `os` module was already in `globals()`. Using `filter()` + `lambda` + `hasattr()` to grab it without typing any blacklisted words was the creative bypass. Wrapping `popen()` output in `list()` instead of calling `.read()` dodged the final filter.
