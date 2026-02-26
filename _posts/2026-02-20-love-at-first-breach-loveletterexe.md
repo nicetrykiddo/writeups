@@ -10,11 +10,10 @@ tags:
   - dynamodb
   - api
 ---
-
-**Challenge:** Love Adventure
-**Category:** Forensics
-**Difficulty:** Hard
-**Flag:** `THM{l0v3_l3tt3r_fr0m_th3_90s_xoxo}`
+- **Challenge:** Love Adventure
+- **Category:** Forensics
+- **Difficulty:** Hard
+- **Flag:** `THM{l0v3_l3tt3r_fr0m_th3_90s_xoxo}`
 
 ---
 

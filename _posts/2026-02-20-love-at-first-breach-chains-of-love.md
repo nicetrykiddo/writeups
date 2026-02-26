@@ -8,13 +8,12 @@ tags:
   - Love-At-First-Breach
   - web
 ---
-
-**Challenge:** Chains of Love
-**Category:** Web
-**Difficulty:** Hard
-**Target IP:** `10.48.151.212`
-**Tools Used:** nmap, gobuster, ffuf, curl, python3, PyJWT
-**Flag:** `THM{s4ndb0x_3sc4p3d_w1th_RCE_l1k3_4_pr0}`
+- **Challenge:** Chains of Love
+- **Category:** Web
+- **Difficulty:** Hard
+- **Target IP:** `10.48.151.212`
+- **Tools Used:** nmap, gobuster, ffuf, curl, python3, PyJWT
+- **Flag:** `THM{s4ndb0x_3sc4p3d_w1th_RCE_l1k3_4_pr0}`
 
 ---
 

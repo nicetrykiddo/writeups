@@ -10,11 +10,10 @@ tags:
   - dynamodb
   - api
 ---
-
-**Challenge:** Cloud Nine
-**Category:** Cloud
-**Difficulty:** Hard
-**Flags:**
+- **Challenge:** Cloud Nine
+- **Category:** Cloud
+- **Difficulty:** Hard
+- **Flags:**
 
 | # | Flag | Value |
 |---|------|-------|
