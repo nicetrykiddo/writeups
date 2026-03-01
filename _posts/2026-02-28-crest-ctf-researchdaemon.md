@@ -554,8 +554,6 @@ I also used a plain `ret` gadget for alignment:
 
 ## 11. Final exploit script
 
-I saved the final script as [`exploit.py`](/home/nicetrykiddo/Documents/ctf/crestpcu/web/writeups/research-daemon/exploit.py).
-
 ```python
 #!/usr/bin/env python3
 
