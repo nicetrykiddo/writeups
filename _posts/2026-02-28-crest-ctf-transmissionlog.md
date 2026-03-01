@@ -10,10 +10,10 @@ tags:
   - reuse
 ---
 
-**Challenge:** transmission.log \[Handshake Reuse / Shadow Protocol]
-**Category:** Crypto
-**Difficulty:** Easy (once you notice the reuse)
-**Flag:** `CREST{mantis_reused_the_channel@ghost!}`
+**Challenge:** transmission.log \[Handshake Reuse / Shadow Protocol]  
+**Category:** Crypto  
+**Difficulty:** Easy (once you notice the reuse)  
+**Flag:** `CREST{mantis_reused_the_channel@ghost!}`  
 
 ---
 
@@ -220,7 +220,7 @@ The script base64-decodes it, gunzips it, and the decompressed content is the fl
 
 ---
 
-## Silent Load (veteran short version)
+## TL;DR
 
 - Enumerated sessions and normalized RSA moduli.
 - Found **modulus reuse** between `alpha` and `gamma`; ignored `delta` since it's a near-copy ending in `...1234567890` (obvious decoy).
